@@ -61,7 +61,7 @@ fi
 # ── build ─────────────────────────────────────────────────────────────────────
 
 echo "Installing dependencies..."
-pnpm install --frozen-lockfile
+pnpm install
 
 echo "Building..."
 pnpm build
