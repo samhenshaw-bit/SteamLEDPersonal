@@ -24,15 +24,15 @@ A Decky Loader plugin for the Steam Machine that drives the front LED light bar 
 1. Open Decky → **Settings → Developer → Install Plugin from URL**
 2. Paste the latest release URL:
    ```
-   https://github.com/<your-username>/SteamLED/releases/latest/download/SteamLED.zip
+   https://github.com/samhenshaw-bit/SteamLEDPersonal/releases/latest/download/SteamLED.zip
    ```
 3. The plugin appears in your Decky menu immediately.
 
 ### On-device build
 
 ```bash
-git clone https://github.com/<your-username>/SteamLED.git
-cd SteamLED
+git clone https://github.com/samhenshaw-bit/SteamLEDPersonal.git
+cd SteamLEDPersonal
 bash install-local.sh
 ```
 
