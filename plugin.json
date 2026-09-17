@@ -1,0 +1,17 @@
+{
+  "name": "SteamLED",
+  "author": "Sam Henshaw",
+  "flags": [
+    "root"
+  ],
+  "api_version": 1,
+  "publish": {
+    "tags": [
+      "system",
+      "customization",
+      "root"
+    ],
+    "description": "Drive the Steam Machine's front light bar. Animated effects, flags, dynamic game palettes extracted from Steam artwork for any game, Fire, Rain, CPU load reactive, audio reactive, and saved profiles.",
+    "image": "assets/thumbnail.png"
+  }
+}

@@ -1,0 +1,26 @@
+{
+  "name": "steam-led",
+  "version": "1.0.0",
+  "description": "Steam Machine front light bar controller with dynamic game palettes",
+  "type": "module",
+  "license": "BSD-3-Clause",
+  "scripts": {
+    "build": "rollup -c",
+    "watch": "rollup -c -w",
+    "test": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@decky/api": "^1.1.2",
+    "@decky/rollup": "^0.0.10",
+    "@decky/ui": "^4.7.1",
+    "@types/react": "^18.3.3",
+    "react-icons": "^5.4.0",
+    "rollup": "^4.28.0",
+    "typescript": "^5.7.2"
+  },
+  "pnpm": {
+    "peerDependencyRules": {
+      "ignoreMissing": ["react", "react-dom"]
+    }
+  }
+}
