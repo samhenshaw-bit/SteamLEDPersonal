@@ -9,6 +9,11 @@ started, p is the live parameter dict.
 """
 
 import math
+import random
+import struct
+import subprocess
+import threading
+import time
 
 from .color import (BLACK, PALETTE_GAMMA, PALETTE_SAT, deepen, from_hex,
                     gamma, saturate, scale)
@@ -325,10 +330,329 @@ class Off(Effect):
         return [BLACK] * n
 
 
+# ── fire ─────────────────────────────────────────────────────────────────────
+
+_FIRE_PALETTES = {
+    "classic": [(0.0, (0,0,0)), (0.3, (1,0,0)), (0.6, (1,0.5,0)), (0.85, (1,1,0)), (1.0, (1,1,1))],
+    "blue":    [(0.0, (0,0,0)), (0.3, (0,0,1)), (0.6, (0,0.5,1)), (0.85, (0,1,1)), (1.0, (1,1,1))],
+    "toxic":   [(0.0, (0,0,0)), (0.3, (0,0.4,0)), (0.6, (0.4,1,0)), (0.85, (1,1,0)), (1.0, (1,1,1))],
+    "magical": [(0.0, (0,0,0)), (0.3, (0.5,0,1)), (0.6, (1,0,0.5)), (0.85, (1,0.5,1)), (1.0, (1,1,1))],
+}
+
+
+def _fire_color(h, stops):
+    h = max(0.0, min(1.0, h))
+    for i in range(len(stops) - 1):
+        t0, c0 = stops[i]
+        t1, c1 = stops[i + 1]
+        if h <= t1:
+            f = (h - t0) / max(1e-9, t1 - t0)
+            return tuple(c0[j] + (c1[j] - c0[j]) * f for j in range(3))
+    return stops[-1][1]
+
+
+class Fire(Effect):
+    id = "fire"
+    label = "Fire"
+    description = "Heat simulation that rises along the bar."
+    fps = 30
+    params = [
+        select("palette", "Colour", "classic", [
+            {"value": "classic", "label": "Classic"},
+            {"value": "blue",    "label": "Blue"},
+            {"value": "toxic",   "label": "Toxic"},
+            {"value": "magical", "label": "Magical"},
+        ]),
+        slider("cooling",  "Cooling",  0.5, 0.1, 1.0, 0.05),
+        slider("sparking", "Sparking", 0.7, 0.1, 1.0, 0.05),
+    ]
+
+    def __init__(self):
+        self._heat = None
+
+    def render(self, t, n, p):
+        if self._heat is None or len(self._heat) != n:
+            self._heat = [0.0] * n
+
+        heat = self._heat
+        cooling = p["cooling"]
+        sparking = p["sparking"]
+
+        # Cool every cell
+        for i in range(n):
+            heat[i] = max(0.0, heat[i] - random.uniform(0, cooling * 0.15))
+
+        # Heat rises: diffuse toward the far end
+        for i in range(n - 1, 1, -1):
+            heat[i] = heat[i - 1] * 0.3 + heat[i - 2] * 0.2 + heat[i] * 0.5
+
+        # Ignite sparks at the base
+        if random.random() < sparking:
+            idx = random.randint(0, min(2, n - 1))
+            heat[idx] = min(1.0, heat[idx] + random.uniform(0.5, 1.0))
+
+        stops = _FIRE_PALETTES.get(p["palette"], _FIRE_PALETTES["classic"])
+        return [gamma(_fire_color(h, stops)) for h in heat]
+
+
+# ── rain ─────────────────────────────────────────────────────────────────────
+
+_RAIN_COLOURS = {
+    "cyan":   (0.0, 1.0, 1.0),
+    "white":  (1.0, 1.0, 1.0),
+    "purple": (0.7, 0.0, 1.0),
+    "green":  (0.0, 1.0, 0.2),
+}
+
+
+class Rain(Effect):
+    id = "rain"
+    label = "Rain"
+    description = "Droplets travel along the bar and fade."
+    fps = 30
+    params = [
+        select("colour", "Colour", "cyan", [
+            {"value": "cyan",   "label": "Cyan"},
+            {"value": "white",  "label": "White"},
+            {"value": "purple", "label": "Purple"},
+            {"value": "green",  "label": "Green"},
+        ]),
+        slider("density",  "Density",     0.3, 0.05, 1.0,  0.05),
+        slider("speed",    "Speed",       1.0, 0.2,  3.0,  0.1, "x"),
+        slider("tail",     "Tail length", 0.7, 0.2,  0.95, 0.05),
+    ]
+
+    def __init__(self):
+        self._drops = []
+        self._buf = None
+        self._last_t = 0.0
+        self._spawn_acc = 0.0
+
+    def render(self, t, n, p):
+        if self._buf is None or len(self._buf) != n:
+            self._buf = [BLACK] * n
+            self._drops = []
+            self._last_t = t
+
+        dt = max(0.0, min(0.1, t - self._last_t))
+        self._last_t = t
+
+        speed   = p["speed"]
+        tail    = p["tail"]
+        density = p["density"]
+        colour  = _RAIN_COLOURS.get(p["colour"], _RAIN_COLOURS["cyan"])
+
+        # Decay
+        self._buf = [tuple(c * tail for c in px) for px in self._buf]
+
+        # Move drops
+        step = speed * dt * n * 0.3
+        self._drops = [d + step for d in self._drops if d + step < n]
+
+        # Spawn
+        self._spawn_acc += density * speed * dt * 2.0
+        while self._spawn_acc >= 1.0:
+            self._spawn_acc -= 1.0
+            self._drops.append(0.0)
+
+        # Paint
+        buf = list(self._buf)
+        for d in self._drops:
+            i = int(d)
+            if 0 <= i < n:
+                buf[i] = tuple(max(buf[i][j], colour[j]) for j in range(3))
+        self._buf = buf
+
+        return [gamma(px) for px in buf]
+
+
+# ── cpu load — background reader ──────────────────────────────────────────────
+
+class _CpuReader:
+    _instance = None
+    _inst_lock = threading.Lock()
+
+    @classmethod
+    def get(cls):
+        with cls._inst_lock:
+            if cls._instance is None:
+                cls._instance = cls()
+            return cls._instance
+
+    def __init__(self):
+        self._load = 0.0
+        self._prev = None
+        self._lock = threading.Lock()
+        threading.Thread(target=self._run, daemon=True).start()
+
+    def load(self):
+        with self._lock:
+            return self._load
+
+    def _read(self):
+        try:
+            with open("/proc/stat") as f:
+                parts = f.readline().split()[1:]
+            vals = list(map(int, parts))
+            return sum(vals), vals[3]  # total, idle
+        except Exception:
+            return None
+
+    def _run(self):
+        while True:
+            cur = self._read()
+            if cur and self._prev:
+                dt = cur[0] - self._prev[0]
+                di = cur[1] - self._prev[1]
+                with self._lock:
+                    self._load = max(0.0, min(1.0, 1.0 - di / max(1, dt)))
+            self._prev = cur
+            time.sleep(0.5)
+
+
+class CpuLoad(Effect):
+    id = "cpu_load"
+    label = "CPU Load"
+    description = "Bar fills with CPU usage. Green → yellow → red."
+    fps = 5
+    params = [
+        slider("floor", "Minimum lit", 0.0, 0.0, 0.5, 0.05),
+    ]
+
+    def render(self, t, n, p):
+        load  = _CpuReader.get().load()
+        floor = p["floor"]
+        fill  = max(floor, load)
+        lit   = max(1, int(round(fill * n)))
+
+        out = []
+        for i in range(n):
+            if i >= lit:
+                out.append(BLACK)
+                continue
+            x = i / max(1, n - 1)
+            if x < 0.5:
+                c = (x * 2, 1.0, 0.0)
+            else:
+                c = (1.0, 1.0 - (x - 0.5) * 2, 0.0)
+            out.append(gamma(c))
+        return out
+
+
+# ── audio reactive — background pacat reader ──────────────────────────────────
+
+class _AudioReader:
+    _instance = None
+    _inst_lock = threading.Lock()
+
+    @classmethod
+    def get(cls):
+        with cls._inst_lock:
+            if cls._instance is None:
+                cls._instance = cls()
+            return cls._instance
+
+    def __init__(self):
+        self._peak = 0.0
+        self._lock = threading.Lock()
+        threading.Thread(target=self._run, daemon=True).start()
+
+    def peak(self):
+        with self._lock:
+            v = self._peak
+            self._peak *= 0.85  # natural decay between reads
+            return v
+
+    def _run(self):
+        RATE  = 8000
+        CHUNK = 800  # 100 ms of samples
+        while True:
+            try:
+                proc = subprocess.Popen(
+                    ["pacat", "--record",
+                     "--device=@DEFAULT_MONITOR@",
+                     "--channels=1",
+                     "--format=s16le",
+                     f"--rate={RATE}",
+                     "--latency-msec=100"],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                )
+                while True:
+                    raw = proc.stdout.read(CHUNK * 2)
+                    if not raw:
+                        break
+                    samples = struct.unpack(f"<{len(raw) // 2}h", raw[: len(raw) // 2 * 2])
+                    if samples:
+                        pk = max(abs(s) for s in samples) / 32768.0
+                        with self._lock:
+                            self._peak = max(self._peak, pk)
+                proc.wait()
+            except Exception:
+                pass
+            time.sleep(2.0)
+
+
+_AUDIO_COLOURS = {
+    "cyan":  (0.0, 1.0, 1.0),
+    "white": (1.0, 1.0, 1.0),
+    "fire":  (1.0, 0.3, 0.0),
+}
+
+
+class AudioReactive(Effect):
+    id = "audio"
+    label = "Audio Reactive"
+    description = "Pulses to the audio output level. Requires pacat (SteamOS default)."
+    fps = 30
+    params = [
+        select("mode", "Mode", "pulse", [
+            {"value": "pulse",  "label": "Brightness pulse"},
+            {"value": "fill",   "label": "Fill bar"},
+            {"value": "shift",  "label": "Colour shift"},
+        ]),
+        select("colour", "Colour", "cyan", [
+            {"value": "cyan",    "label": "Cyan"},
+            {"value": "white",   "label": "White"},
+            {"value": "fire",    "label": "Fire"},
+            {"value": "rainbow", "label": "Rainbow"},
+        ]),
+        slider("sensitivity", "Sensitivity", 1.0, 0.2, 4.0, 0.1, "x"),
+        slider("floor",       "Minimum",     0.05, 0.0, 0.5, 0.02),
+    ]
+
+    def _base_colour(self, key, t):
+        if key == "rainbow":
+            h6 = (t * 0.1 % 1.0) * 6
+            x  = 1 - abs(h6 % 2 - 1)
+            i  = int(h6) % 6
+            return [(1,x,0),(x,1,0),(0,1,x),(0,x,1),(x,0,1),(1,0,x)][i]
+        return _AUDIO_COLOURS.get(key, _AUDIO_COLOURS["cyan"])
+
+    def render(self, t, n, p):
+        raw   = _AudioReader.get().peak()
+        level = min(1.0, raw * p["sensitivity"])
+        level = max(p["floor"], level)
+        base  = self._base_colour(p["colour"], t)
+        mode  = p["mode"]
+
+        if mode == "fill":
+            lit = max(1, int(round(level * n)))
+            return [gamma(base) if i < lit else BLACK for i in range(n)]
+
+        if mode == "shift":
+            comp = tuple(1.0 - c for c in base)
+            c = tuple(base[j] + (comp[j] - base[j]) * level for j in range(3))
+            return [gamma(scale(c, 0.8 + 0.2 * level))] * n
+
+        # pulse (default)
+        return [gamma(scale(base, level))] * n
+
+
 # ── registry ──────────────────────────────────────────────────────────────────
 
-REGISTRY = {e.id: e for e in [Animated, Static, Off]}
-ORDER = ["animated", "static", "off"]
+REGISTRY = {e.id: e for e in [Animated, Static, Fire, Rain, CpuLoad, AudioReactive, Off]}
+ORDER = ["animated", "static", "fire", "rain", "cpu_load", "audio", "off"]
 
 
 def catalog():
