@@ -1,38 +1,26 @@
-"""Effects.
-
-Two primary effects, deliberately: Animated (anything that moves) and Static
-(anything that doesn't). Everything the user picks is a parameter of one of
-those, rather than a top-level entry. That keeps the effect dropdown short
-and puts related choices next to each other.
-
-Additional special-purpose effects: Fire, Rain, CpuLoad, AudioReactive.
+"""Effects — Animated, Static, Off.
 
 Each effect declares its own parameters including show_if conditions.
-The frontend builds controls from that metadata — adding a new effect
-needs no TypeScript changes.
+The frontend builds controls from that metadata — no TypeScript changes
+needed when adding a new parameter.
 
-An effect implements render(t, n, p) -> list of n rgb tuples, where t is
-seconds since the effect started and p is the live parameter dict.
+render(t, n, p) -> list of n rgb tuples. t is seconds since the effect
+started, p is the live parameter dict.
 """
 
 import math
-import os
-import subprocess
-import threading
-import time
 
 from .color import (BLACK, PALETTE_GAMMA, PALETTE_SAT, deepen, from_hex,
-                    gamma, hsv, lerp, saturate, scale)
+                    gamma, saturate, scale)
 from .flags import options as flag_options
 from .flags import sample as flag_sample
 from .games import animate as game_animate
-from .games import options as game_options
 from .games import sample as game_sample
 from .scroll import colors_for as scroll_colors
 from .scroll import options as scroll_options
 
 
-# ── parameter descriptors ────────────────────────────────────────────────────
+# ── parameter descriptors ─────────────────────────────────────────────────────
 
 def slider(key, label, default, lo, hi, step=0.1, unit=""):
     return {"key": key, "label": label, "type": "slider", "default": default,
@@ -53,11 +41,6 @@ def select(key, label, default, options):
 
 
 def only_if(spec, *conditions):
-    """Show a parameter only when all conditions hold.
-
-    Conditions are (key, op, value) with op in "eq", "ne", "gte", "in".
-    Evaluated in the frontend from this metadata.
-    """
     spec = dict(spec)
     spec["show_if"] = [{"key": k, "op": op, "value": v}
                        for k, op, v in conditions]
@@ -65,12 +48,11 @@ def only_if(spec, *conditions):
 
 
 def palette_bar(pixels, stretch=True):
-    """Apply gamma + saturation to a pixel list for palette-style rendering."""
     src = deepen(pixels) if stretch else pixels
     return [gamma(saturate(c, PALETTE_SAT), g=PALETTE_GAMMA) for c in src]
 
 
-# ── base ─────────────────────────────────────────────────────────────────────
+# ── base ──────────────────────────────────────────────────────────────────────
 
 class Effect:
     id = "base"
@@ -78,7 +60,7 @@ class Effect:
     description = ""
     params: list = []
     fps = 60
-    static = False  # static effects paint once and idle
+    static = False
 
     def render(self, t, n, p):
         raise NotImplementedError
@@ -143,7 +125,6 @@ class Static(Effect):
             {"value": "color",  "label": "Solid color"},
             {"value": "preset", "label": "Colors"},
             {"value": "flag",   "label": "Flag"},
-            {"value": "game",   "label": "Game palette"},
         ]),
         only_if(color("color", "Color", "1A9FFF"), ("mode", "eq", "color")),
         only_if(select("preset", "Colors", "sunset",
@@ -151,14 +132,12 @@ class Static(Effect):
                 ("mode", "eq", "preset")),
         only_if(slider("spread", "Hue spread", 1.0, 0.2, 3.0, 0.1),
                 ("mode", "eq", "preset"), ("preset", "eq", "rainbow")),
-        only_if(select("flag", "Flag", "uk", _flag_menu()),
+        only_if(select("flag", "Flag", "us", _flag_menu()),
                 ("mode", "eq", "flag")),
         only_if(slider("size", "Eye size", 1.6, 1.0, 5.0, 0.2, "px"),
                 ("mode", "eq", "flag"), ("flag", "eq", HAL_ID)),
         only_if(slider("halo", "Halo", 0.12, 0.0, 0.5, 0.02),
                 ("mode", "eq", "flag"), ("flag", "eq", HAL_ID)),
-        only_if(select("game", "Game", "deadlock", game_options()),
-                ("mode", "eq", "game")),
     ]
 
     def __init__(self):
@@ -169,27 +148,28 @@ class Static(Effect):
         mode = p["mode"]
 
         if mode == "game":
-            # Check for animated palette first (e.g. Balatro)
             live = game_animate(p.get("game", "deadlock"), t, n)
             if live is not None:
                 return palette_bar(live, stretch=False)
+
+        if mode == "flag" and p.get("flag") == HAL_ID:
+            key = ("hal", n, p.get("size", 1.6), p.get("halo", 0.12))
+            if key != self._key:
+                self._cache = _hal(n, "FF0A0A", p.get("size", 1.6), p.get("halo", 0.12))
+                self._key = key
+            return self._cache
 
         key = (mode, n, p.get("flag"), p.get("game"), p.get("color"),
                p.get("preset"), p.get("spread"))
         if key != self._key:
             if mode == "flag":
-                if p["flag"] == HAL_ID:
-                    self._cache = _hal(n, "FF0A0A", p.get("size", 1.6),
-                                       p.get("halo", 0.12))
-                else:
-                    self._cache = palette_bar(flag_sample(p["flag"], n))
+                self._cache = palette_bar(flag_sample(p["flag"], n))
             elif mode == "game":
-                self._cache = palette_bar(
-                    game_sample(p.get("game", "deadlock"), n))
+                self._cache = palette_bar(game_sample(p.get("game", "deadlock"), n))
             elif mode == "preset":
                 self._cache = palette_bar(_preset_bar(p, n), stretch=False)
             else:
-                self._cache = [gamma(from_hex(p["color"]))] * n
+                self._cache = [gamma(from_hex(p.get("color", "1A9FFF")))] * n
             self._key = key
         return self._cache
 
@@ -197,14 +177,14 @@ class Static(Effect):
 # ── animated ──────────────────────────────────────────────────────────────────
 
 MOTIONS = [
-    {"value": "scroll",       "label": "Scroll Right"},
-    {"value": "scroll_left",  "label": "Scroll Left"},
-    {"value": "pulse",        "label": "Outward Pulse"},
-    {"value": "split",        "label": "Inward Pulse"},
-    {"value": "bounce",       "label": "Bounce"},
-    {"value": "fade",         "label": "Crossfade"},
-    {"value": "breathe",      "label": "Breathe"},
-    {"value": "scanner",      "label": "Scanner"},
+    {"value": "scroll",      "label": "Scroll Right"},
+    {"value": "scroll_left", "label": "Scroll Left"},
+    {"value": "pulse",       "label": "Outward Pulse"},
+    {"value": "split",       "label": "Inward Pulse"},
+    {"value": "bounce",      "label": "Bounce"},
+    {"value": "fade",        "label": "Crossfade"},
+    {"value": "breathe",     "label": "Breathe"},
+    {"value": "scanner",     "label": "Scanner"},
 ]
 
 _BANDED = ("scroll", "scroll_left", "pulse", "bounce", "split")
@@ -324,308 +304,12 @@ class Animated(Effect):
             elif motion == "fade":
                 u = -phase
             elif motion == "split":
-                u = (center - abs(i - center)) / max(1e-6, center) \
-                    - phase * 2.0
+                u = (center - abs(i - center)) / max(1e-6, center) - phase * 2.0
             elif motion == "scroll_left":
                 u = x + phase
             else:
                 u = x - phase
             out.append(gamma(self._at(u, rgb, soft)))
-        return out
-
-
-# ── fire ─────────────────────────────────────────────────────────────────────
-
-class Fire(Effect):
-    id = "fire"
-    label = "Fire"
-    description = "Heat simulation — sparks ignite at one end and cool toward the other."
-    fps = 30
-    params = [
-        slider("cooling", "Cooling", 0.08, 0.02, 0.25, 0.01),
-        slider("sparking", "Sparking", 0.7, 0.2, 1.0, 0.05),
-        select("colour", "Colour", "classic", [
-            {"value": "classic", "label": "Classic fire"},
-            {"value": "blue",    "label": "Blue flame"},
-            {"value": "green",   "label": "Toxic"},
-            {"value": "purple",  "label": "Magical"},
-        ]),
-    ]
-
-    def __init__(self):
-        self._heat = None
-
-    @staticmethod
-    def _palette(v, colour):
-        """Map heat value 0-1 to an RGB colour."""
-        if colour == "blue":
-            if v < 0.5:
-                return (0.0, 0.0, v * 2)
-            else:
-                t = (v - 0.5) * 2
-                return (t * 0.8, t * 0.9, 1.0)
-        if colour == "green":
-            if v < 0.5:
-                return (0.0, v * 2, 0.0)
-            else:
-                t = (v - 0.5) * 2
-                return (t * 0.8, 1.0, t * 0.8)
-        if colour == "purple":
-            if v < 0.5:
-                return (v * 1.4, 0.0, v * 2)
-            else:
-                t = (v - 0.5) * 2
-                return (0.7 + t * 0.3, t * 0.8, 1.0)
-        # classic: black → red → orange → yellow → white
-        if v < 0.33:
-            return (v / 0.33, 0.0, 0.0)
-        elif v < 0.66:
-            t = (v - 0.33) / 0.33
-            return (1.0, t, 0.0)
-        else:
-            t = (v - 0.66) / 0.34
-            return (1.0, 1.0, t)
-
-    def render(self, t, n, p):
-        import random
-
-        if self._heat is None or len(self._heat) != n:
-            self._heat = [0.0] * n
-
-        cooling = p["cooling"]
-        sparking = p["sparking"]
-        colour = p["colour"]
-
-        # Cool each cell
-        for i in range(n):
-            self._heat[i] = max(0.0, self._heat[i] - cooling * random.random())
-
-        # Diffuse upward (toward index 0 = start of bar)
-        for i in range(n - 1, 1, -1):
-            self._heat[i] = (self._heat[i] * 0.5 +
-                             self._heat[i - 1] * 0.3 +
-                             self._heat[i - 2] * 0.2)
-
-        # Randomly ignite sparks near the base (end of bar)
-        if random.random() < sparking:
-            cell = n - 1 - int(random.random() * max(1, n // 5))
-            self._heat[cell] = min(1.0, self._heat[cell] + random.random() * 0.6 + 0.3)
-
-        return [gamma(self._palette(self._heat[i], colour)) for i in range(n)]
-
-
-# ── rain ─────────────────────────────────────────────────────────────────────
-
-class Rain(Effect):
-    id = "rain"
-    label = "Rain"
-    description = "Drips fall from one end of the bar and fade as they travel."
-    fps = 30
-    params = [
-        slider("density",     "Density",     0.4,  0.1, 1.0, 0.05),
-        slider("tail_length", "Tail length", 0.5,  0.2, 0.9, 0.05),
-        slider("speed",       "Speed",       1.0,  0.3, 3.0, 0.1, "x"),
-        color("drop_color",   "Color",       "00CCFF"),
-    ]
-
-    def __init__(self):
-        self._drops = []  # list of (position_float, brightness)
-        self._next_drop = 0.0
-        self._last_t = 0.0
-
-    def render(self, t, n, p):
-        import random
-
-        dt = max(0.0, min(0.1, t - self._last_t))
-        self._last_t = t
-
-        speed = p["speed"]
-        density = p["density"]
-        tail = p["tail_length"]
-        base_rgb = gamma(from_hex(p["drop_color"]))
-
-        # Spawn new drops
-        self._next_drop -= dt
-        if self._next_drop <= 0.0:
-            self._drops.append([0.0, 1.0])
-            interval = 0.3 / max(0.01, density)
-            self._next_drop = interval * (0.5 + random.random() * 0.5)
-
-        # Advance drops
-        advance = speed * 8.0 * dt
-        self._drops = [[pos + advance, br] for pos, br in self._drops
-                       if pos < n + 2]
-
-        # Build pixel buffer
-        buf = [[0.0, 0.0, 0.0] for _ in range(n)]
-        for pos, br in self._drops:
-            for j in range(n):
-                d = abs(j - pos)
-                if d <= 0.5:
-                    intensity = br
-                elif d < tail * n * 0.5:
-                    intensity = br * (1.0 - d / (tail * n * 0.5)) ** 2
-                else:
-                    continue
-                for c in range(3):
-                    buf[j][c] = min(1.0, buf[j][c] + base_rgb[c] * intensity)
-
-        return [tuple(px) for px in buf]
-
-
-# ── cpu load ─────────────────────────────────────────────────────────────────
-
-class CpuLoad(Effect):
-    id = "cpu_load"
-    label = "CPU Load"
-    description = "Bar fills left-to-right with CPU usage. Green → yellow → red."
-    fps = 10
-    static = False
-    params = [
-        slider("poll_ms", "Update interval", 500, 200, 2000, 100, "ms"),
-    ]
-
-    def __init__(self):
-        self._load = 0.0
-        self._last_read = 0.0
-        self._prev_idle = None
-        self._prev_total = None
-
-    def _read_cpu(self):
-        """Read /proc/stat and return CPU usage fraction 0-1."""
-        try:
-            with open("/proc/stat") as f:
-                line = f.readline()
-            fields = [int(x) for x in line.split()[1:]]
-            idle = fields[3]
-            total = sum(fields)
-            if self._prev_total is None:
-                self._prev_idle = idle
-                self._prev_total = total
-                return 0.0
-            d_idle = idle - self._prev_idle
-            d_total = total - self._prev_total
-            self._prev_idle = idle
-            self._prev_total = total
-            if d_total == 0:
-                return 0.0
-            return max(0.0, min(1.0, 1.0 - d_idle / d_total))
-        except (OSError, IndexError, ValueError):
-            return 0.0
-
-    def render(self, t, n, p):
-        poll = p["poll_ms"] / 1000.0
-        if t - self._last_read >= poll:
-            self._load = self._read_cpu()
-            self._last_read = t
-
-        filled = int(round(self._load * n))
-        out = []
-        for i in range(n):
-            if i >= filled:
-                out.append(BLACK)
-                continue
-            frac = i / max(1, n - 1)
-            # green (0, 1, 0) → yellow (1, 1, 0) → red (1, 0, 0)
-            if frac < 0.5:
-                c = lerp((0.0, 1.0, 0.0), (1.0, 1.0, 0.0), frac * 2)
-            else:
-                c = lerp((1.0, 1.0, 0.0), (1.0, 0.0, 0.0), (frac - 0.5) * 2)
-            out.append(gamma(c))
-        return out
-
-
-# ── audio reactive ────────────────────────────────────────────────────────────
-
-class AudioReactive(Effect):
-    id = "audio_reactive"
-    label = "Audio Reactive"
-    description = "Pulses brightness to the audio output level via PulseAudio/PipeWire."
-    fps = 30
-    params = [
-        slider("sensitivity", "Sensitivity", 1.0, 0.2, 5.0, 0.1),
-        select("preset", "Colors", "sunset", scroll_options(include_custom=False)),
-        select("mode", "Mode", "pulse", [
-            {"value": "pulse",   "label": "Brightness pulse"},
-            {"value": "fill",    "label": "Fill bar"},
-            {"value": "breathe", "label": "Colour shift"},
-        ]),
-    ]
-
-    # Shared state across all instances — one background reader thread.
-    _level = 0.0
-    _reader_thread = None
-    _reader_lock = threading.Lock()
-    _stop_reader = False
-
-    @classmethod
-    def _ensure_reader(cls):
-        with cls._reader_lock:
-            if cls._reader_thread is not None and cls._reader_thread.is_alive():
-                return
-            cls._stop_reader = False
-            t = threading.Thread(target=cls._reader_loop, daemon=True)
-            t.start()
-            cls._reader_thread = t
-
-    @classmethod
-    def _reader_loop(cls):
-        """Poll pactl for sink peak level every ~50ms."""
-        while not cls._stop_reader:
-            try:
-                result = subprocess.run(
-                    ["pactl", "get-sink-peak", "0"],
-                    capture_output=True, text=True, timeout=0.5
-                )
-                val = float(result.stdout.strip())
-                cls._level = max(0.0, min(1.0, val))
-            except Exception:
-                cls._level = 0.0
-            time.sleep(0.05)
-
-    def __init__(self):
-        self._ensure_reader()
-        self._smooth = 0.0
-
-    def render(self, t, n, p):
-        raw = AudioReactive._level * p["sensitivity"]
-        raw = max(0.0, min(1.0, raw))
-        # Smooth: fast attack, slow decay
-        if raw > self._smooth:
-            self._smooth = self._smooth * 0.3 + raw * 0.7
-        else:
-            self._smooth = self._smooth * 0.85 + raw * 0.15
-        v = self._smooth
-
-        cols = scroll_colors(p["preset"], 1.0)
-        if not cols:
-            cols = ["FF3030", "FF8800"]
-        rgb = [from_hex(c) for c in cols]
-        m = len(rgb)
-
-        mode = p["mode"]
-        out = []
-
-        if mode == "fill":
-            filled = int(round(v * n))
-            for i in range(n):
-                if i < filled:
-                    idx = int((i / max(1, n - 1)) * (m - 1))
-                    out.append(gamma(rgb[min(idx, m - 1)]))
-                else:
-                    out.append(BLACK)
-        elif mode == "breathe":
-            hue_phase = t * 0.1
-            for i in range(n):
-                from .color import hsv as _hsv
-                h = (hue_phase + i / n * 0.3) % 1.0
-                c = _hsv(h, 0.9, v)
-                out.append(gamma(c))
-        else:  # pulse
-            base_idx = int((t * 0.1) % 1.0 * m)
-            c = rgb[base_idx % m]
-            out = [scale(gamma(c), v)] * n
-
         return out
 
 
@@ -643,11 +327,8 @@ class Off(Effect):
 
 # ── registry ──────────────────────────────────────────────────────────────────
 
-REGISTRY = {e.id: e for e in [
-    Animated, Static, Fire, Rain, CpuLoad, AudioReactive, Off
-]}
-
-ORDER = ["animated", "static", "fire", "rain", "cpu_load", "audio_reactive", "off"]
+REGISTRY = {e.id: e for e in [Animated, Static, Off]}
+ORDER = ["animated", "static", "off"]
 
 
 def catalog():

@@ -1,98 +1,97 @@
-"""Decky plugin entry point.
+import os
+import sys
 
-Each async method decorated with nothing is exposed as an RPC call the
-TypeScript frontend can invoke via serverAPI.callPluginMethod().
-"""
+try:
+    import decky
+    SETTINGS_DIR = decky.DECKY_PLUGIN_SETTINGS_DIR
+    LOGGER = decky.logger
+except ImportError:
+    import logging
+    LOGGER = logging.getLogger("steamled")
+    SETTINGS_DIR = os.path.expanduser(
+        "~/.config/decky-loader/plugins/SteamLED"
+    )
 
-import asyncio
+sys.path.append(os.path.join(os.path.dirname(__file__), "py_modules"))
 
-from py_modules.steamled.effects import catalog
-from py_modules.steamled.engine import Engine
-
-_engine = Engine()
+from steamled import effects as fx          # noqa: E402
+from steamled import games                  # noqa: E402
+from steamled.engine import Engine          # noqa: E402
+from steamled.strip import available        # noqa: E402
 
 
 class Plugin:
     # ── lifecycle ─────────────────────────────────────────────────────────────
 
     async def _main(self):
-        """Called when the plugin loads. Hardware detection runs in the background
-        so Decky can dispatch RPC calls immediately while the strip is still
-        being probed (valve-leds devices can take a moment to appear)."""
-        loop = asyncio.get_running_loop()
-        loop.run_in_executor(None, _engine.autostart)
+        settings = os.path.join(SETTINGS_DIR, "config.json")
+        self.engine = Engine(settings_path=settings, logger=LOGGER)
+        LOGGER.info(f"SteamLED loaded. Light bar present: {available()}")
+        self.engine.autostart()
 
     async def _unload(self):
-        """Called when Decky unloads the plugin (not system shutdown).
+        try:
+            self.engine.stop(restore=True, persist=False)
+        except Exception as e:
+            LOGGER.warning(f"unload: {e}")
+        LOGGER.info("SteamLED unloaded")
 
-        Does NOT persist the disabled state — the user didn't turn it off,
-        they just closed Decky. On next load, autostart resumes the effect.
-        """
-        await asyncio.get_event_loop().run_in_executor(
-            None, lambda: _engine.stop(persist=False)
-        )
+    async def _uninstall(self):
+        try:
+            self.engine.stop(restore=True, persist=False)
+        except Exception:
+            pass
 
-    # ── read ──────────────────────────────────────────────────────────────────
+    # ── queries ───────────────────────────────────────────────────────────────
 
-    async def get_status(self):
-        return _engine.get_status()
+    async def get_status(self) -> dict:
+        return self.engine.status()
 
-    async def get_catalog(self):
-        return catalog()
+    async def get_catalog(self) -> list:
+        return fx.catalog()
 
-    async def get_params(self, effect_id: str):
-        status = _engine.get_status()
-        effects = status.get("effects", {})
-        return effects.get(effect_id, {})
+    async def get_params(self, effect_id: str) -> dict:
+        return self.engine.params_for(effect_id)
 
     # ── control ───────────────────────────────────────────────────────────────
 
-    async def set_enabled(self, enabled: bool):
-        _engine.set_enabled(enabled)
+    async def set_enabled(self, enabled: bool) -> dict:
+        if enabled:
+            self.engine.start()
+        else:
+            self.engine.stop(restore=True)
+        return self.engine.status()
 
-    async def set_effect(self, effect_id: str):
-        _engine.set_effect(effect_id)
+    async def set_effect(self, effect_id: str) -> dict:
+        self.engine.select(effect_id)
+        if not self.engine.state["enabled"]:
+            self.engine.start()
+        return self.engine.status()
 
-    async def set_param(self, effect_id: str, key: str, value):
-        _engine.set_param(effect_id, key, value)
+    async def set_param(self, effect_id: str, key: str, value) -> bool:
+        self.engine.set_param(effect_id, key, value)
+        return True
 
-    async def set_brightness(self, value: float):
-        _engine.set_brightness(value)
+    async def set_brightness(self, value: float) -> bool:
+        self.engine.set_brightness(value)
+        return True
 
-    async def set_reverse(self, value: bool):
-        _engine.set_reverse(value)
+    async def set_reverse(self, value: bool) -> bool:
+        self.engine.set_reverse(value)
+        return True
 
-    async def set_now_playing(self, enabled: bool):
-        _engine.set_now_playing(enabled)
+    async def set_now_playing(self, value: bool) -> dict:
+        self.engine.set_now_playing(value)
+        return self.engine.status()
 
-    # ── game palette (dynamic artwork extraction) ─────────────────────────────
+    async def game_changed(self, title: str = "") -> dict:
+        gid = games.match(title) if title else None
+        LOGGER.info(f"game_changed: {title!r} -> {gid}")
+        self.engine.notify_game(gid)
+        return self.engine.status()
 
-    async def set_game_palette(self, colors: list, app_id: str = None):
-        """Accept a palette extracted by the frontend from Steam artwork.
-
-        colors: list of 2-6 hex strings (with or without #).
-        app_id: Steam app id string (optional, for cache invalidation).
-        """
-        _engine.set_game_palette(colors, app_id=app_id)
-
-    async def game_changed(self, title: str, app_id: str = None):
-        """Called by the frontend when the running game changes.
-
-        Triggers curated palette fallback if no dynamic palette has been
-        delivered yet for this app.
-        """
-        _engine.game_changed(title, app_id=app_id)
-
-    # ── profiles ──────────────────────────────────────────────────────────────
-
-    async def list_profiles(self):
-        return _engine.list_profiles()
-
-    async def save_profile(self, name: str):
-        return _engine.save_profile(name)
-
-    async def load_profile(self, name: str):
-        return _engine.load_profile(name)
-
-    async def delete_profile(self, name: str):
-        return _engine.delete_profile(name)
+    async def set_game_palette(self, colors: list = None, app_id: str = None) -> bool:
+        colors = colors or []
+        LOGGER.info(f"set_game_palette: {len(colors)} colours for app {app_id!r}")
+        self.engine.set_game_palette(colors, app_id)
+        return True
