@@ -25,7 +25,7 @@ mkdir -p out/SteamLED
 
 cp -r dist out/SteamLED/
 cp -r py_modules out/SteamLED/
-cp main.py plugin.json out/SteamLED/
+cp main.py plugin.json package.json out/SteamLED/
 
 cd out
 zip -r SteamLED.zip SteamLED/

@@ -33,7 +33,7 @@ jobs:
       - name: Package
         run: |
           mkdir -p out/SteamLED
-          cp -r dist py_modules main.py plugin.json out/SteamLED/
+          cp -r dist py_modules main.py plugin.json package.json out/SteamLED/
           cd out && zip -r SteamLED.zip SteamLED/
 
       - name: Create GitHub Release

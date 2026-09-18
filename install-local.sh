@@ -74,7 +74,7 @@ sudo mkdir -p "$PLUGIN_DIR"
 
 sudo cp -r dist "$PLUGIN_DIR/"
 sudo cp -r py_modules "$PLUGIN_DIR/"
-sudo cp main.py plugin.json "$PLUGIN_DIR/"
+sudo cp main.py plugin.json package.json "$PLUGIN_DIR/"
 
 sudo chmod -R 755 "$PLUGIN_DIR"
 
