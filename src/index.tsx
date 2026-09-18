@@ -249,6 +249,7 @@ function Content() {
   const [localParams, setLocalParams] = useState<Record<string, unknown>>({});
   const [extractedPalette, setExtractedPalette] = useState<string[] | null>(null);
   const [detectedAppId, setDetectedAppId] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   // Optimistic local parameter state for snappy UI response.
   function updateLocalParam(key: string, val: unknown) {
@@ -256,16 +257,25 @@ function Content() {
   }
 
   const refresh = useCallback(async () => {
-    const [s, c] = await Promise.all([getStatus(), getCatalog()]);
-    if (s) {
-      setStatus(s);
-      setLocalParams(s.params ?? {});
-      // Sync palette state from backend (e.g. after profile load).
-      if (s.game_palette && s.game_palette.length > 0) {
-        setExtractedPalette(s.game_palette);
+    try {
+      const s = await getStatus();
+      if (s) {
+        setStatus(s);
+        setLoadError(null);
+        setLocalParams(s.params ?? {});
+        if (s.game_palette && s.game_palette.length > 0) {
+          setExtractedPalette(s.game_palette);
+        }
       }
+    } catch (e) {
+      setLoadError(`Backend error: ${e}`);
     }
-    if (c) setCatalog(c);
+    try {
+      const c = await getCatalog();
+      if (c) setCatalog(c);
+    } catch (_) {
+      // non-fatal — keep whatever catalog we have
+    }
   }, []);
 
   // Poll while panel is open.
@@ -292,7 +302,7 @@ function Content() {
       <PanelSection>
         <PanelSectionRow>
           <span style={{ color: "rgba(255,255,255,0.5)", fontSize: 13 }}>
-            Loading…
+            {loadError ?? "Loading…"}
           </span>
         </PanelSectionRow>
       </PanelSection>

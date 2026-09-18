@@ -16,9 +16,11 @@ class Plugin:
     # ── lifecycle ─────────────────────────────────────────────────────────────
 
     async def _main(self):
-        """Called when the plugin loads. Hardware detection happens here."""
-        loop = asyncio.get_event_loop()
-        await loop.run_in_executor(None, _engine.autostart)
+        """Called when the plugin loads. Hardware detection runs in the background
+        so Decky can dispatch RPC calls immediately while the strip is still
+        being probed (valve-leds devices can take a moment to appear)."""
+        loop = asyncio.get_running_loop()
+        loop.run_in_executor(None, _engine.autostart)
 
     async def _unload(self):
         """Called when Decky unloads the plugin (not system shutdown).
